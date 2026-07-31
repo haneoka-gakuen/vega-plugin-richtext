@@ -1,0 +1,18 @@
+name: Feature proposal
+description: Propose a format-neutral rich-text service capability
+title: "[Proposal] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Service and plugin boundary
+      description: Explain why this belongs in the shared service rather than a format plugin.
+    validations:
+      required: true

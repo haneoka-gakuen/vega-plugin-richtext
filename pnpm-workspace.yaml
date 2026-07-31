@@ -1,0 +1,9 @@
+packages:
+  - "."
+  - ".dependencies/vega"
+  - ".dependencies/vega/packages/protocol"
+
+linkWorkspacePackages: true
+
+allowBuilds:
+  esbuild: true

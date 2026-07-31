@@ -1,0 +1,25 @@
+name: Bug report
+description: Report a reproducible rich-text service defect
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      placeholder: "@haneoka/vega-plugin-richtext 0.1.0"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include the input format, source text, display mode, and renderer registration order.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
