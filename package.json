@@ -37,21 +37,29 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./sdf": {
+      "types": "./dist/sdf/index.d.ts",
+      "import": "./dist/sdf/index.js",
+      "default": "./dist/sdf/index.js"
+    }
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify:package": "node scripts/verify-package.mjs",
     "check": "pnpm run typecheck && pnpm run build && pnpm run verify:package",
-    "prepack": "pnpm run check"
+    "prepack": "pnpm run check",
+    "format": "prettier --write . --ignore-unknown",
+    "format:check": "prettier --check . --ignore-unknown"
   },
   "peerDependencies": {
     "@haneoka/vega": "^0.1.0"
   },
   "devDependencies": {
     "@haneoka/vega": "workspace:*",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "prettier": "3.7.4"
   },
   "publishConfig": {
     "access": "public",
@@ -74,5 +82,8 @@
       "android",
       "ios"
     ]
+  },
+  "dependencies": {
+    "linebreak": "1.1.0"
   }
 }
