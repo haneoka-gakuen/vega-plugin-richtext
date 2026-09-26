@@ -51,6 +51,13 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
   const baseAscent = primary.ascent * baseScale;
   const baseDescent = primary.descent * baseScale;
   const lineGap = (primary.lineHeight - primary.ascent + primary.descent) * baseScale;
+  // TMP lineSpacing values are authored per-font. -54 was tuned for ShinGoPr6N
+  // (2.0 line-height ratio); Chinese/Korean fonts have tighter natural metrics
+  // where the same offset collapses lines below the glyph height. Clamp so
+  // lines never overlap regardless of which family is primary.
+  const spacingFloor = baseSize * 0.9;
+  const rawLineHeight = Math.max(1, baseAscent - baseDescent + lineGap + (options.lineSpacing ?? 0) * em);
+  const effectiveLineHeight = Math.max(spacingFloor, rawLineHeight);
   const style: Style = {
     size: baseSize,
     color: options.color ?? [1, 1, 1, 1],
@@ -277,12 +284,12 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
       for (const q of atom.quads) quads.push({ ...q, x: x + q.x, y: top + ascent + q.y });
       x += atom.advance;
     }
-    top += options.lineHeight ?? Math.max(1, ascent - descent + lineGap + (options.lineSpacing ?? 0) * em);
+    top += options.lineHeight ?? effectiveLineHeight;
   }
   const lastLine = lines.at(-1) ?? [];
   const descent = Math.min(baseDescent, ...lastLine.map((a) => a.descent));
   const ascent = Math.max(baseAscent, ...lastLine.map((a) => a.ascent));
-  const lastAdvance = options.lineHeight ?? Math.max(1, ascent - descent + lineGap + (options.lineSpacing ?? 0) * em);
+  const lastAdvance = options.lineHeight ?? effectiveLineHeight;
   return {
     quads,
     width: measuredWidth,
