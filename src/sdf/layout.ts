@@ -16,6 +16,7 @@ interface Atom {
   spacing?: number;
   ascent: number;
   descent: number;
+  lineGap: number;
   quads: SdfGlyphQuad[];
   noBreak: boolean;
   newline?: boolean;
@@ -50,14 +51,8 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
   const baseScale = (baseSize / primary.size) * primary.scale;
   const baseAscent = primary.ascent * baseScale;
   const baseDescent = primary.descent * baseScale;
-  const lineGap = (primary.lineHeight - primary.ascent + primary.descent) * baseScale;
-  // TMP lineSpacing values are authored per-font. -54 was tuned for ShinGoPr6N
-  // (2.0 line-height ratio); Chinese/Korean fonts have tighter natural metrics
-  // where the same offset collapses lines below the glyph height. Clamp so
-  // lines never overlap regardless of which family is primary.
-  const spacingFloor = baseSize * 0.9;
-  const rawLineHeight = Math.max(1, baseAscent - baseDescent + lineGap + (options.lineSpacing ?? 0) * em);
-  const effectiveLineHeight = Math.max(spacingFloor, rawLineHeight);
+  const baseLineGap = (primary.lineHeight - primary.ascent + primary.descent) * baseScale;
+  const explicitSpacing = (options.lineSpacing ?? 0) * em;
   const style: Style = {
     size: baseSize,
     color: options.color ?? [1, 1, 1, 1],
@@ -74,6 +69,7 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
           advance: 0,
           ascent: baseAscent,
           descent: baseDescent,
+          lineGap: baseLineGap,
           quads: [],
           noBreak: false,
           newline: true,
@@ -88,6 +84,7 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
           advance: /\s/u.test(char) ? state.size * 0.25 : 0,
           ascent: baseAscent,
           descent: baseDescent,
+          lineGap: baseLineGap,
           quads: [],
           noBreak: state.noBreak,
         });
@@ -123,6 +120,7 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
         spacing,
         ascent: ((font.ascent * state.size) / font.size) * font.scale,
         descent: ((font.descent * state.size) / font.size) * font.scale,
+        lineGap: ((font.lineHeight - font.ascent + font.descent) * state.size * font.scale) / font.size,
         quads,
         noBreak: state.noBreak,
       });
@@ -135,7 +133,15 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
       else if (node.type === "space") {
         const advance =
           node.value * (node.unit === "px" ? pixelScale : node.unit === "%" ? state.size / 100 : state.size);
-        atoms.push({ text: "", advance, ascent: baseAscent, descent: baseDescent, quads: [], noBreak: true });
+        atoms.push({
+          text: "",
+          advance,
+          ascent: baseAscent,
+          descent: baseDescent,
+          lineGap: baseLineGap,
+          quads: [],
+          noBreak: true,
+        });
       } else if (node.type === "size") visit(node.children, { ...state, size: (baseSize * node.percent) / 100 });
       else if (node.type === "style") {
         const next = { ...state };
@@ -175,7 +181,12 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
         const ascent = primary.ascent * scale;
         const alignment = options.ruby?.alignment ?? "center";
         const leading = alignment === "base" ? 0 : Math.max(0, (annotation.width - base.width) / 2);
-        const advance = alignment === "center" ? Math.max(base.width, annotation.width) : base.width + leading;
+        const baseX = leading;
+        const annotationX = leading + (base.width - annotation.width) / 2;
+        // Keep the authored overhang (notably for base/annotation alignment),
+        // but advance past the rightmost ruby content so the next atom cannot
+        // overlap an annotation that extends beyond the base.
+        const advance = Math.max(baseX + base.width, annotationX + annotation.width);
         const annotationTop =
           options.ruby?.verticalOffset === undefined
             ? -ascent - annotation.height
@@ -186,11 +197,12 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
           ascent,
           descent: primary.descent * scale,
           noBreak: true,
+          lineGap: baseLineGap,
           quads: [
-            ...base.quads.map((q) => ({ ...q, x: q.x + leading, y: q.y - (base.baseline ?? ascent) + state.offset })),
+            ...base.quads.map((q) => ({ ...q, x: q.x + baseX, y: q.y - (base.baseline ?? ascent) + state.offset })),
             ...annotation.quads.map((q) => ({
               ...q,
-              x: q.x + leading + (base.width - annotation.width) / 2,
+              x: q.x + annotationX,
               y: q.y + annotationTop + state.offset,
             })),
           ],
@@ -269,11 +281,13 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
   const quads: SdfGlyphQuad[] = [];
   let top = 0,
     measuredWidth = 0,
-    baseline = baseAscent;
+    baseline = baseAscent,
+    lastLineAdvance = 0;
   for (const line of lines) {
     const ascent = Math.max(baseAscent, ...line.map((a) => a.ascent));
     if (top === 0) baseline = ascent;
     const descent = Math.min(baseDescent, ...line.map((a) => a.descent));
+    const lineGap = Math.max(baseLineGap, ...line.map((a) => a.lineGap));
     const width = widthOf(line) - (line.at(-1)?.spacing ?? 0);
     measuredWidth = Math.max(measuredWidth, width);
     const align = Number.isFinite(maxWidth)
@@ -284,16 +298,16 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
       for (const q of atom.quads) quads.push({ ...q, x: x + q.x, y: top + ascent + q.y });
       x += atom.advance;
     }
-    top += options.lineHeight ?? effectiveLineHeight;
+    lastLineAdvance = options.lineHeight ?? Math.max(0, ascent - descent + lineGap + explicitSpacing);
+    top += lastLineAdvance;
   }
   const lastLine = lines.at(-1) ?? [];
   const descent = Math.min(baseDescent, ...lastLine.map((a) => a.descent));
   const ascent = Math.max(baseAscent, ...lastLine.map((a) => a.ascent));
-  const lastAdvance = options.lineHeight ?? effectiveLineHeight;
   return {
     quads,
     width: measuredWidth,
-    height: Math.max(ascent - descent, top - lastAdvance + ascent - descent),
+    height: Math.max(ascent - descent, top - lastLineAdvance + ascent - descent),
     text,
     missing: [...missing],
     lines: lines.length,

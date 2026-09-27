@@ -27,6 +27,7 @@ export interface SdfFont {
 export interface SdfMaterial {
   readonly floats: Readonly<Record<string, number>>;
   readonly colors: Readonly<Record<string, SdfColor>>;
+  readonly keywords?: readonly string[];
 }
 export interface SdfGlyphQuad {
   readonly characterIndex?: number;

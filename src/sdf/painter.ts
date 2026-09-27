@@ -5,14 +5,92 @@ export interface SdfAtlasPixels {
   readonly height: number;
   readonly alpha: Uint8Array;
 }
+
+const MAX_GPU_ATLAS_BYTES = 64 * 1024 * 1024;
+const MAX_PAINT_PIXELS = 16 * 1024 * 1024;
+const MAX_PAINT_DIMENSION = 8192;
+
+interface TextureEntry {
+  readonly texture: WebGLTexture;
+  readonly bytes: number;
+  lastUsed: number;
+  pinned: boolean;
+}
+
+const paintDimensions = (
+  width: number,
+  height: number,
+  ratio: number,
+  padding: number,
+): { width: number; height: number } | undefined => {
+  const scaledWidth = Math.ceil((width + padding * 2) * ratio);
+  const scaledHeight = Math.ceil((height + padding * 2) * ratio);
+  if (
+    !Number.isFinite(scaledWidth) ||
+    !Number.isFinite(scaledHeight) ||
+    scaledWidth < 1 ||
+    scaledHeight < 1 ||
+    scaledWidth > MAX_PAINT_DIMENSION ||
+    scaledHeight > MAX_PAINT_DIMENSION ||
+    scaledWidth * scaledHeight > MAX_PAINT_PIXELS
+  )
+    return undefined;
+  return { width: scaledWidth, height: scaledHeight };
+};
+
+const MATERIAL_FLOAT_DEFAULTS: Readonly<Record<string, number>> = Object.freeze({
+  _FaceDilate: 0,
+  _OutlineSoftness: 0,
+  _OutlineWidth: 0,
+  _UnderlayOffsetX: 0,
+  _UnderlayOffsetY: 0,
+  _UnderlayDilate: 0,
+  _UnderlaySoftness: 0,
+  _GradientScale: 0,
+  _TextureWidth: 1,
+  _TextureHeight: 1,
+  _WeightNormal: 0,
+  _WeightBold: 0,
+  _ScaleRatioA: 0,
+  _ScaleRatioB: 0,
+  _ScaleRatioC: 0,
+  _VertexOffsetX: 0,
+  _VertexOffsetY: 0,
+  _MaskSoftnessX: 0,
+  _MaskSoftnessY: 0,
+  _ScaleX: 1,
+  _ScaleY: 1,
+  _PerspectiveFilter: 0,
+  _Sharpness: 0,
+});
+
+const MATERIAL_COLOR_DEFAULTS: Readonly<Record<string, readonly [number, number, number, number]>> = Object.freeze({
+  _FaceColor: [1, 1, 1, 1],
+  _OutlineColor: [0, 0, 0, 0],
+  _UnderlayColor: [0, 0, 0, 0],
+  _ClipRect: [-32767, -32767, 32767, 32767],
+});
+
+const OUTLINE_FLOATS = new Set(["_OutlineSoftness", "_OutlineWidth"]);
+const UNDERLAY_FLOATS = new Set([
+  "_UnderlayOffsetX",
+  "_UnderlayOffsetY",
+  "_UnderlayDilate",
+  "_UnderlaySoftness",
+  "_ScaleRatioC",
+]);
+
 export class SdfTextPainter {
   readonly canvas: HTMLCanvasElement;
   private readonly gl: WebGL2RenderingContext;
   private readonly program: WebGLProgram;
   private readonly buffer: WebGLBuffer;
   private readonly vao: WebGLVertexArrayObject;
-  private readonly textures = new Map<string, WebGLTexture>();
+  private readonly textures = new Map<string, TextureEntry>();
   private readonly uniforms = new Map<string, WebGLUniformLocation | null>();
+  private readonly pinnedKeys = new Set<string>();
+  private useClock = 0;
+  private textureBytes = 0;
   private disposed = false;
   get isOperational(): boolean {
     return !this.disposed && !this.gl.isContextLost();
@@ -50,6 +128,15 @@ export class SdfTextPainter {
           source = source.replaceAll(
             "void main()",
             "vec4 sampleSdf(sampler2D atlas, vec2 uv) { return vec4(1.0, 1.0, 1.0, texture(atlas, uv).r); }\nvoid main()",
+          );
+          source = `uniform highp float _HaneokaOutlineEnabled;\nuniform highp float _HaneokaUnderlayEnabled;\n${source}`;
+          source = source.replace(
+            "u_xlat0 = u_xlat16_1.xxxx * u_xlat16_0;",
+            "u_xlat0 = u_xlat16_1.xxxx * u_xlat16_0 * _HaneokaUnderlayEnabled;",
+          );
+          source = source.replace(
+            "u_xlat16_1 = u_xlat16_3.xxxx * u_xlat16_1 + vs_COLOR1;",
+            "u_xlat16_1 = mix(vs_COLOR0, u_xlat16_3.xxxx * u_xlat16_1 + vs_COLOR1, _HaneokaOutlineEnabled);",
           );
         }
         gl.shaderSource(shader, `#version 300 es\n#define ${define}\n${source}`);
@@ -98,10 +185,78 @@ export class SdfTextPainter {
     if (!this.uniforms.has(name)) this.uniforms.set(name, this.gl.getUniformLocation(this.program, name));
     return this.uniforms.get(name) ?? null;
   }
+
+  private removeTexture(key: string, entry: TextureEntry): void {
+    this.gl.deleteTexture(entry.texture);
+    this.textures.delete(key);
+    this.textureBytes -= entry.bytes;
+  }
+
+  private evictFor(bytes: number): boolean {
+    if (bytes > MAX_GPU_ATLAS_BYTES) return false;
+    while (this.textureBytes + bytes > MAX_GPU_ATLAS_BYTES) {
+      const candidate = [...this.textures.entries()]
+        .filter(([, entry]) => !entry.pinned)
+        .filter(([key]) => !this.pinnedKeys.has(key))
+        .sort(([, left], [, right]) => left.lastUsed - right.lastUsed)[0];
+      if (!candidate) return false;
+      this.removeTexture(candidate[0], candidate[1]);
+    }
+    return true;
+  }
+
+  /**
+   * Protects and fits one complete paint set before uploading any texture.
+   * This prevents an early required atlas from being evicted while a later
+   * required atlas is uploaded.
+   */
+  prepareAtlases(keys: readonly string[], pixels: ReadonlyMap<string, SdfAtlasPixels>): boolean {
+    const required = new Set(keys);
+    let additionalBytes = 0;
+    for (const key of required) {
+      if (this.textures.has(key)) continue;
+      const value = pixels.get(key);
+      if (!value) return false;
+      additionalBytes += value.alpha.byteLength;
+    }
+    const newlyPinned: string[] = [];
+    for (const key of required) {
+      if (!this.pinnedKeys.has(key)) newlyPinned.push(key);
+      this.pinnedKeys.add(key);
+      const entry = this.textures.get(key);
+      if (entry) entry.pinned = true;
+    }
+    if (!this.evictFor(additionalBytes)) {
+      for (const key of newlyPinned) {
+        this.pinnedKeys.delete(key);
+        const entry = this.textures.get(key);
+        if (entry) entry.pinned = false;
+      }
+      return false;
+    }
+    for (const key of required) {
+      const entry = this.textures.get(key);
+      if (entry) {
+        entry.pinned = true;
+        entry.lastUsed = ++this.useClock;
+      }
+    }
+    return true;
+  }
+
+  canPaint(width: number, height: number, ratio: number, padding: number): boolean {
+    return paintDimensions(width, height, ratio, padding) !== undefined;
+  }
+
   upload(font: SdfFont, index: number, pixels: SdfAtlasPixels): void {
     if (this.disposed) return;
     const key = `${font.id}:${index}`;
-    if (this.textures.has(key)) return;
+    const existing = this.textures.get(key);
+    if (existing) {
+      existing.lastUsed = ++this.useClock;
+      return;
+    }
+    if (!this.evictFor(pixels.alpha.byteLength)) throw new Error("SDF atlas GPU residency is full");
     const gl = this.gl,
       texture = gl.createTexture();
     if (!texture) throw new Error("Unable to allocate SDF atlas");
@@ -117,7 +272,30 @@ export class SdfTextPainter {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    this.textures.set(key, texture);
+    this.textures.set(key, {
+      texture,
+      bytes: pixels.alpha.byteLength,
+      lastUsed: ++this.useClock,
+      pinned: this.pinnedKeys.has(key),
+    });
+    this.textureBytes += pixels.alpha.byteLength;
+  }
+  pin(keys: readonly string[]): void {
+    for (const key of keys) {
+      this.pinnedKeys.add(key);
+      const entry = this.textures.get(key);
+      if (entry) {
+        entry.pinned = true;
+        entry.lastUsed = ++this.useClock;
+      }
+    }
+  }
+  unpin(keys: readonly string[]): void {
+    for (const key of keys) {
+      this.pinnedKeys.delete(key);
+      const entry = this.textures.get(key);
+      if (entry) entry.pinned = false;
+    }
   }
   paint(
     layout: SdfTextLayout,
@@ -128,9 +306,11 @@ export class SdfTextPainter {
     padding = 4,
   ): HTMLCanvasElement {
     if (!this.isOperational) throw new Error("SDF painter is unavailable");
+    const dimensions = paintDimensions(width, height, ratio, padding);
+    if (!dimensions) throw new Error("SDF paint exceeds the bounded canvas budget");
     const gl = this.gl,
-      W = Math.max(1, Math.ceil((width + padding * 2) * ratio)),
-      H = Math.max(1, Math.ceil((height + padding * 2) * ratio));
+      W = dimensions.width,
+      H = dimensions.height;
     if (this.canvas.width !== W) this.canvas.width = W;
     if (this.canvas.height !== H) this.canvas.height = H;
     gl.useProgram(this.program);
@@ -140,8 +320,20 @@ export class SdfTextPainter {
     for (const name of ["hlslcc_mtx4x4glstate_matrix_projection[0]", "hlslcc_mtx4x4unity_MatrixVP[0]"])
       gl.uniform4fv(this.uniform(name), projection);
     gl.uniform4f(this.uniform("_ScreenParams"), W, H, 1 + 1 / W, 1 + 1 / H);
-    for (const [name, value] of Object.entries(material.floats)) gl.uniform1f(this.uniform(name), value);
+    for (const [name, value] of Object.entries(MATERIAL_FLOAT_DEFAULTS)) gl.uniform1f(this.uniform(name), value);
+    const outlineEnabled = material.keywords?.includes("OUTLINE_ON") ?? false;
+    const underlayEnabled = material.keywords?.includes("UNDERLAY_ON") ?? false;
+    for (const [name, value] of Object.entries(material.floats)) {
+      const effective =
+        (!outlineEnabled && OUTLINE_FLOATS.has(name)) || (!underlayEnabled && UNDERLAY_FLOATS.has(name)) ? 0 : value;
+      gl.uniform1f(this.uniform(name), effective);
+    }
+    for (const [name, value] of Object.entries(MATERIAL_COLOR_DEFAULTS)) gl.uniform4fv(this.uniform(name), value);
     for (const [name, value] of Object.entries(material.colors)) gl.uniform4fv(this.uniform(name), value);
+    if (!outlineEnabled) gl.uniform4fv(this.uniform("_OutlineColor"), [0, 0, 0, 0]);
+    if (!underlayEnabled) gl.uniform4fv(this.uniform("_UnderlayColor"), [0, 0, 0, 0]);
+    gl.uniform1f(this.uniform("_HaneokaOutlineEnabled"), outlineEnabled ? 1 : 0);
+    gl.uniform1f(this.uniform("_HaneokaUnderlayEnabled"), underlayEnabled ? 1 : 0);
     gl.viewport(0, 0, W, H);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -155,6 +347,7 @@ export class SdfTextPainter {
     for (const [key, quads] of batches) {
       const texture = this.textures.get(key);
       if (!texture) throw new Error(`SDF atlas is not ready: ${key}`);
+      texture.lastUsed = ++this.useClock;
       const font = quads[0]!.font;
       gl.uniform1f(this.uniform("_TextureWidth"), font.atlasWidth);
       gl.uniform1f(this.uniform("_TextureHeight"), font.atlasHeight);
@@ -188,7 +381,7 @@ export class SdfTextPainter {
         }
       }
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.bindTexture(gl.TEXTURE_2D, texture.texture);
       gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.DYNAMIC_DRAW);
       gl.drawArrays(gl.TRIANGLES, 0, vertices.length / 15);
     }
@@ -197,8 +390,11 @@ export class SdfTextPainter {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    for (const texture of this.textures.values()) this.gl.deleteTexture(texture);
+    for (const texture of this.textures.values()) this.gl.deleteTexture(texture.texture);
     this.textures.clear();
+    this.pinnedKeys.clear();
+    this.useClock = 0;
+    this.textureBytes = 0;
     this.gl.deleteBuffer(this.buffer);
     this.gl.deleteVertexArray(this.vao);
     this.gl.deleteProgram(this.program);
@@ -220,18 +416,26 @@ export async function decodeSdfAtlas(
     image.src = url;
     await image.decode();
     if (signal?.aborted) throw signal.reason;
+    const width = image.naturalWidth;
+    const height = image.naturalHeight;
+    if (!width || !height) throw new Error("SDF atlas has no pixels");
     const canvas = document.createElement("canvas");
-    canvas.width = image.naturalWidth;
-    canvas.height = image.naturalHeight;
+    const rowsPerTile = Math.min(128, height);
+    canvas.width = width;
+    canvas.height = rowsPerTile;
     const context = canvas.getContext("2d", { willReadFrequently: true });
     if (!context) throw new Error("Unable to decode SDF atlas");
-    context.drawImage(image, 0, 0);
-    const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
-    const alpha = new Uint8Array(canvas.width * canvas.height);
-    for (let y = 0; y < canvas.height; y++)
-      for (let x = 0; x < canvas.width; x++)
-        alpha[(canvas.height - 1 - y) * canvas.width + x] = data[(y * canvas.width + x) * 4 + 3]!;
-    const result = { width: canvas.width, height: canvas.height, alpha };
+    const alpha = new Uint8Array(width * height);
+    for (let sourceY = 0; sourceY < height; sourceY += rowsPerTile) {
+      if (signal?.aborted) throw signal.reason;
+      const rows = Math.min(rowsPerTile, height - sourceY);
+      context.clearRect(0, 0, width, rowsPerTile);
+      context.drawImage(image, 0, sourceY, width, rows, 0, 0, width, rows);
+      const data = context.getImageData(0, 0, width, rows).data;
+      for (let y = 0; y < rows; y++)
+        for (let x = 0; x < width; x++) alpha[(height - 1 - sourceY - y) * width + x] = data[(y * width + x) * 4 + 3]!;
+    }
+    const result = { width, height, alpha };
     canvas.width = 1;
     canvas.height = 1;
     return result;
