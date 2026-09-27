@@ -16,7 +16,6 @@ interface Atom {
   spacing?: number;
   ascent: number;
   descent: number;
-  lineGap: number;
   quads: SdfGlyphQuad[];
   noBreak: boolean;
   newline?: boolean;
@@ -69,7 +68,6 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
           advance: 0,
           ascent: baseAscent,
           descent: baseDescent,
-          lineGap: baseLineGap,
           quads: [],
           noBreak: false,
           newline: true,
@@ -84,7 +82,6 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
           advance: /\s/u.test(char) ? state.size * 0.25 : 0,
           ascent: baseAscent,
           descent: baseDescent,
-          lineGap: baseLineGap,
           quads: [],
           noBreak: state.noBreak,
         });
@@ -120,7 +117,6 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
         spacing,
         ascent: ((font.ascent * state.size) / font.size) * font.scale,
         descent: ((font.descent * state.size) / font.size) * font.scale,
-        lineGap: ((font.lineHeight - font.ascent + font.descent) * state.size * font.scale) / font.size,
         quads,
         noBreak: state.noBreak,
       });
@@ -138,7 +134,6 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
           advance,
           ascent: baseAscent,
           descent: baseDescent,
-          lineGap: baseLineGap,
           quads: [],
           noBreak: true,
         });
@@ -197,7 +192,6 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
           ascent,
           descent: primary.descent * scale,
           noBreak: true,
-          lineGap: baseLineGap,
           quads: [
             ...base.quads.map((q) => ({ ...q, x: q.x + baseX, y: q.y - (base.baseline ?? ascent) + state.offset })),
             ...annotation.quads.map((q) => ({
@@ -287,7 +281,6 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
     const ascent = Math.max(baseAscent, ...line.map((a) => a.ascent));
     if (top === 0) baseline = ascent;
     const descent = Math.min(baseDescent, ...line.map((a) => a.descent));
-    const lineGap = Math.max(baseLineGap, ...line.map((a) => a.lineGap));
     const width = widthOf(line) - (line.at(-1)?.spacing ?? 0);
     measuredWidth = Math.max(measuredWidth, width);
     const align = Number.isFinite(maxWidth)
@@ -298,7 +291,7 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
       for (const q of atom.quads) quads.push({ ...q, x: x + q.x, y: top + ascent + q.y });
       x += atom.advance;
     }
-    lastLineAdvance = options.lineHeight ?? Math.max(0, ascent - descent + lineGap + explicitSpacing);
+    lastLineAdvance = options.lineHeight ?? Math.max(0, ascent - descent + baseLineGap + explicitSpacing);
     top += lastLineAdvance;
   }
   const lastLine = lines.at(-1) ?? [];
