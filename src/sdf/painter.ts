@@ -1,10 +1,30 @@
-import type { SdfFont, SdfGlyphQuad, SdfMaterial, SdfTextLayout } from "./types.js";
+import type { SdfFont, SdfGlyph, SdfGlyphQuad, SdfMarkQuad, SdfMaterial, SdfTextLayout } from "./types.js";
 
 export interface SdfAtlasPixels {
   readonly width: number;
   readonly height: number;
   readonly alpha: Uint8Array;
 }
+
+/** Synthetic font backing <mark> highlight rects (solid 1x1 white texture). */
+const MARK_FONT: SdfFont = {
+  id: "\0mark",
+  size: 1,
+  ascent: 1,
+  descent: 0,
+  lineHeight: 1,
+  padding: 0,
+  scale: 1,
+  atlasWidth: 1,
+  atlasHeight: 1,
+  normalWeight: 0,
+  boldWeight: 0,
+  boldSpacing: 0,
+  characters: {},
+  glyphs: {},
+  atlases: [],
+};
+const MARK_GLYPH: SdfGlyph = { index: 0, atlas: 0, rect: [0, 0, 1, 1], metrics: [1, 1, 0, 0, 1], scale: 1 };
 
 const MAX_GPU_ATLAS_BYTES = 64 * 1024 * 1024;
 const MAX_PAINT_PIXELS = 16 * 1024 * 1024;
@@ -338,6 +358,30 @@ export class SdfTextPainter {
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
     const batches = new Map<string, SdfGlyphQuad[]>();
+    // <mark> highlights reuse the glyph pipeline with a solid 1x1 texture so
+    // they render behind the glyphs without a second shader program. The batch
+    // is inserted first so the rectangles paint behind every glyph batch.
+    const marks = layout.marks ?? [];
+    if (marks.length) {
+      this.ensureMarkTexture();
+      const synthetic: SdfGlyphQuad = {
+        font: MARK_FONT,
+        glyph: MARK_GLYPH,
+        character: "",
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+        scale: 0,
+        color: [1, 1, 1, 1],
+        italic: false,
+        bold: false,
+      };
+      batches.set(
+        MARK_FONT.id,
+        marks.map((mark: SdfMarkQuad) => ({ ...synthetic, color: mark.color, mark })),
+      );
+    }
     for (const quad of layout.quads) {
       const key = `${quad.font.id}:${quad.glyph.atlas}`;
       const batch = batches.get(key) ?? [];
@@ -357,6 +401,7 @@ export class SdfTextPainter {
       const vertices = new Float32Array(quads.length * 90);
       let cursor = 0;
       for (const q of quads) {
+        const mark = (q as SdfGlyphQuad & { mark?: SdfMarkQuad }).mark;
         const [x, y, w, h] = q.glyph.rect,
           p = font.padding;
         const u0 = (x - p) / font.atlasWidth,
@@ -367,14 +412,48 @@ export class SdfTextPainter {
           right = left + q.width * ratio,
           top = H - (q.y + padding) * ratio,
           bottom = top - q.height * ratio;
-        const italic = q.italic ? q.height * ratio * 0.15 : 0;
+        let corners: [number, number][];
+        if (mark) {
+          const markLeft = (mark.x + padding) * ratio;
+          const markRight = markLeft + mark.width * ratio;
+          const markTop = H - (mark.y + padding) * ratio;
+          const markBottom = markTop - mark.height * ratio;
+          corners = [
+            [markLeft, markBottom],
+            [markRight, markBottom],
+            [markRight, markTop],
+            [markLeft, markTop],
+          ];
+        } else {
+          const italic = q.italic ? q.height * ratio * 0.15 : 0;
+          const unrotated: [number, number][] = [
+            [left - italic, bottom],
+            [right - italic, bottom],
+            [right + italic, top],
+            [left + italic, top],
+          ];
+          if (q.rotate) {
+            // Clockwise in visual space; vertex y grows towards the canvas
+            // bottom after the H flip, so a CCW rotation here reads clockwise.
+            const rad = (q.rotate * Math.PI) / 180;
+            const cos = Math.cos(rad);
+            const sin = Math.sin(rad);
+            const cx = (left + right) / 2,
+              cy = (top + bottom) / 2;
+            corners = unrotated.map(([px, py]) => [
+              cx + (px - cx) * cos - (py - cy) * sin,
+              cy + (px - cx) * sin + (py - cy) * cos,
+            ]);
+          } else corners = unrotated;
+        }
+        const [c0, c1, c2, c3] = corners;
         for (const [px, py, u, v] of [
-          [left - italic, bottom, u0, v0],
-          [right - italic, bottom, u1, v0],
-          [right + italic, top, u1, v1],
-          [left - italic, bottom, u0, v0],
-          [right + italic, top, u1, v1],
-          [left + italic, top, u0, v1],
+          [c0![0], c0![1], u0, v0],
+          [c1![0], c1![1], u1, v0],
+          [c2![0], c2![1], u1, v1],
+          [c0![0], c0![1], u0, v0],
+          [c2![0], c2![1], u1, v1],
+          [c3![0], c3![1], u0, v1],
         ]) {
           vertices.set([px!, py!, 0, 1, 0, 0, -1, ...q.color, u!, v!, 0, q.scale * ratio * (q.bold ? -1 : 1)], cursor);
           cursor += 15;
@@ -386,6 +465,12 @@ export class SdfTextPainter {
       gl.drawArrays(gl.TRIANGLES, 0, vertices.length / 15);
     }
     return this.canvas;
+  }
+
+  /** Uploads (once) the solid white 1x1 texture backing <mark> highlights. */
+  private ensureMarkTexture(): void {
+    if (this.textures.has(MARK_FONT.id)) return;
+    this.upload(MARK_FONT, 0, { width: 1, height: 1, alpha: new Uint8Array([255]) });
   }
   dispose(): void {
     if (this.disposed) return;

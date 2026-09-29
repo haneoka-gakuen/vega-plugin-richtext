@@ -42,9 +42,21 @@ export interface SdfGlyphQuad {
   readonly color: SdfColor;
   readonly italic: boolean;
   readonly bold: boolean;
+  /** Per-glyph rotation in degrees clockwise (<rotate=N>), around the glyph centre. */
+  readonly rotate?: number;
+}
+/** Flat highlight rectangle behind a text run (<mark=#color>). */
+export interface SdfMarkQuad {
+  readonly characterIndex?: number;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly color: SdfColor;
 }
 export interface SdfTextLayout {
   readonly quads: readonly SdfGlyphQuad[];
+  readonly marks?: readonly SdfMarkQuad[];
   readonly width: number;
   readonly height: number;
   readonly text: string;

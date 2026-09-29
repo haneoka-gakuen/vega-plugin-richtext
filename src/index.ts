@@ -1,11 +1,23 @@
-import {
-  defineVegaPlugin,
-  defineVegaService,
-  parseAdvRichText,
+import { defineVegaPlugin, defineVegaService, VEGA_TEXT_METRICS, type VegaPlugin } from "@haneoka/vega/plugin";
+import { advSliceVisible, advTextLengthCss, advVisibleLength, parseAdvRichText, type AdvRichTextNode } from "./adv/parser";
+
+// The ADV (TextMeshPro / RubyTextMeshPro) grammar lives here, not in Vega core.
+export {
+  advSliceVisible,
   advTextLengthCss,
-  type AdvRichTextNode,
-  type VegaPlugin,
-} from "@haneoka/vega/plugin";
+  advTextSizePercent,
+  advVisibleLength,
+  parseAdvRichText,
+} from "./adv/parser";
+export type {
+  AdvRichTextBreakNode,
+  AdvRichTextNode,
+  AdvRichTextRubyNode,
+  AdvRichTextSizeNode,
+  AdvRichTextSpaceNode,
+  AdvRichTextStyleNode,
+  AdvRichTextTextNode,
+} from "./adv/parser";
 
 export interface VegaRichTextSource {
   readonly format: string;
@@ -374,6 +386,13 @@ export const createVegaRichTextPlugin = (): VegaPlugin =>
     setup(context) {
       const service = new DefaultVegaRichTextService();
       context.provide(VEGA_RICH_TEXT_SERVICE, service);
+      // "adv" and "plain" are measured here; other formats fall back to one
+      // unit per code point outside angle brackets.
+      context.provide(VEGA_TEXT_METRICS, {
+        visibleLength: (source, format) => (format === "plain" ? Array.from(source).length : advVisibleLength(source)),
+        sliceVisible: (source, units, format) =>
+          format === "plain" ? Array.from(source).slice(0, units).join("") : advSliceVisible(source, units),
+      });
       return { dispose: () => service.dispose() };
     },
   });

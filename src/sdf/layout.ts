@@ -1,6 +1,14 @@
 import LineBreaker from "linebreak";
-import { parseAdvRichText, type AdvRichTextNode } from "@haneoka/vega/plugin";
-import type { SdfColor, SdfFont, SdfGlyph, SdfGlyphQuad, SdfTextLayout, SdfTextLayoutOptions } from "./types.js";
+import { parseAdvRichText, type AdvRichTextNode } from "../adv/parser";
+import type {
+  SdfColor,
+  SdfFont,
+  SdfGlyph,
+  SdfGlyphQuad,
+  SdfMarkQuad,
+  SdfTextLayout,
+  SdfTextLayoutOptions,
+} from "./types.js";
 
 interface Style {
   size: number;
@@ -9,6 +17,10 @@ interface Style {
   italic: boolean;
   offset: number;
   noBreak: boolean;
+  align?: "left" | "center" | "right";
+  rotate?: number;
+  cspace?: number;
+  mark?: SdfColor;
 }
 interface Atom {
   text: string;
@@ -19,6 +31,14 @@ interface Atom {
   quads: SdfGlyphQuad[];
   noBreak: boolean;
   newline?: boolean;
+  /** Per-run paragraph alignment (<align>). */
+  align?: Style["align"];
+  /** <pos>: absolute horizontal origin jump, resolved once during the width walk. */
+  posX?: number;
+  /** <mark> highlight painted behind the atom's run. */
+  mark?: SdfColor;
+  /** Code-point offset of this atom in the plain text, for typewriter reveal. */
+  characterIndex?: number;
 }
 const length = (value: string, size: number, pixelScale: number): number => {
   const number = parseFloat(value);
@@ -111,14 +131,17 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
             ]
           : [];
       const spacing = ((options.characterSpacing ?? 0) + (state.bold ? font.boldSpacing : 0)) * em;
+      const extraSpacing = state.cspace ?? 0;
       atoms.push({
         text: char,
-        advance: advance * scale + spacing + (space ? (options.wordSpacing ?? 0) * em : 0),
-        spacing,
+        advance: advance * scale + spacing + extraSpacing + (space ? (options.wordSpacing ?? 0) * em : 0),
+        spacing: spacing + extraSpacing,
         ascent: ((font.ascent * state.size) / font.size) * font.scale,
         descent: ((font.descent * state.size) / font.size) * font.scale,
-        quads,
+        quads: quads.map((q) => (state.rotate ? { ...q, rotate: state.rotate } : q)),
         noBreak: state.noBreak,
+        ...(state.align ? { align: state.align } : {}),
+        ...(state.mark ? { mark: state.mark } : {}),
       });
     }
   };
@@ -153,6 +176,31 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
         if (node.style.top) next.offset += length(node.style.top, next.size, pixelScale);
         if (node.style.whiteSpace === "nowrap") next.noBreak = true;
         if (node.style.color && options.parseColor) next.color = options.parseColor(node.style.color);
+        if (node.style.textAlign) {
+          const value = node.style.textAlign.toLowerCase();
+          if (value === "left" || value === "center" || value === "right") next.align = value;
+        }
+        if (node.style.rotate) {
+          const value = parseFloat(node.style.rotate);
+          if (Number.isFinite(value) && value !== 0) next.rotate = value;
+        }
+        if (node.style.letterSpacing) next.cspace = length(node.style.letterSpacing, next.size, pixelScale);
+        if (node.style.background && options.parseColor) next.mark = options.parseColor(node.style.background);
+        // <pos>: jump the absolute horizontal origin before the children. The
+        // jump is resolved against the accumulating line width in the break
+        // walk, so it stays consistent with wrapping and alignment.
+        if (node.style.position === "absolute" && node.style.left) {
+          atoms.push({
+            text: "",
+            advance: 0,
+            ascent: baseAscent,
+            descent: baseDescent,
+            quads: [],
+            noBreak: true,
+            ...(next.align ? { align: next.align } : {}),
+            posX: length(node.style.left, next.size, pixelScale),
+          });
+        }
         visit(node.children, next);
       } else if (node.type === "ruby") {
         const rubyScale = options.ruby?.scale ?? 0.5;
@@ -207,6 +255,7 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
   visit(parseAdvRichText(source), style);
   let characterIndex = 0;
   for (const atom of atoms) {
+    atom.characterIndex = characterIndex;
     atom.quads = atom.quads.map((quad, index) => ({
       ...quad,
       characterIndex: characterIndex + Math.min(index, Math.max(0, [...atom.text].length - 1)),
@@ -254,6 +303,11 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
       pushLine();
       continue;
     }
+    // <pos>: consume the jump into the atom's advance so width accumulation,
+    // wrapping and placement all see the origin move the same way. The marker
+    // atom stays in the line (it draws nothing) so the following glyphs are
+    // placed after the jump.
+    if (atom.posX != null) atom.advance = Math.max(0, atom.posX - currentWidth);
     if (atom.noBreak && !atoms[i - 1]?.noBreak && current.length) lastBreak = current.length;
     if (
       current.length &&
@@ -273,23 +327,77 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
   }
   if (current.length || !lines.length || atoms.at(-1)?.newline) pushLine();
   const quads: SdfGlyphQuad[] = [];
+  const marks: SdfMarkQuad[] = [];
   let top = 0,
     measuredWidth = 0,
     baseline = baseAscent,
     lastLineAdvance = 0;
+  type Align = "left" | "center" | "right";
+  const defaultAlign: Align = options.align ?? "left";
   for (const line of lines) {
     const ascent = Math.max(baseAscent, ...line.map((a) => a.ascent));
     if (top === 0) baseline = ascent;
     const descent = Math.min(baseDescent, ...line.map((a) => a.descent));
     const width = widthOf(line) - (line.at(-1)?.spacing ?? 0);
     measuredWidth = Math.max(measuredWidth, width);
-    const align = Number.isFinite(maxWidth)
-      ? Math.max(0, maxWidth - width) * (options.align === "center" ? 0.5 : options.align === "right" ? 1 : 0)
-      : 0;
-    let x = align;
-    for (const atom of line) {
-      for (const q of atom.quads) quads.push({ ...q, x: x + q.x, y: top + ascent + q.y });
-      x += atom.advance;
+    // Placement: contiguous atoms sharing one alignment form a run. A single
+    // run uses the plain TMP offset; mixed runs (e.g. a <align="left"> title
+    // beside <align="right"> mirror text on one line) anchor left runs at the
+    // left edge, right runs at the right edge, and centre the remaining runs
+    // in the space between.
+    const runs: { align: Align; start: number; end: number; width: number }[] = [];
+    for (let i = 0; i < line.length; ) {
+      const align = line[i]!.align ?? defaultAlign;
+      let j = i;
+      let runWidth = 0;
+      while (j < line.length && (line[j]!.align ?? defaultAlign) === align) {
+        runWidth += line[j]!.advance;
+        j += 1;
+      }
+      runs.push({ align, start: i, end: j, width: runWidth });
+      i = j;
+    }
+    const single = runs.length === 1 ? runs[0]! : undefined;
+    // Mixed-run anchoring needs a finite right edge; unbounded containers
+    // (nowrap, ruby sub-layouts) always fall back to left-flow placement.
+    const bound = Number.isFinite(maxWidth) ? maxWidth : width;
+    const leftWidth = runs.reduce((sum, r) => (r.align === "left" ? sum + r.width : sum), 0);
+    const rightWidth = runs.reduce((sum, r) => (r.align === "right" ? sum + r.width : sum), 0);
+    const centerWidth = runs.reduce((sum, r) => (r.align === "center" ? sum + r.width : sum), 0);
+    const centerGap = Math.max(0, bound - leftWidth - rightWidth);
+    let leftCursor = 0;
+    let centerCursor = leftWidth + centerGap / 2 - centerWidth / 2;
+    let rightCursor = Math.max(0, bound - rightWidth);
+    let x = 0;
+    for (const run of runs) {
+      x =
+        single && !Number.isFinite(maxWidth)
+          ? 0
+          : single
+            ? Math.max(0, bound - width) * (run.align === "center" ? 0.5 : run.align === "right" ? 1 : 0)
+            : run.align === "left"
+              ? leftCursor
+              : run.align === "right"
+                ? rightCursor
+                : centerCursor;
+      if (run.align === "left") leftCursor += run.width;
+      else if (run.align === "right") rightCursor += run.width;
+      else centerCursor += run.width;
+      for (let i = run.start; i < run.end; i++) {
+        const atom = line[i]!;
+        if (atom.mark) {
+          marks.push({
+            ...(atom.characterIndex !== undefined ? { characterIndex: atom.characterIndex } : {}),
+            x,
+            y: top + ascent - atom.ascent,
+            width: atom.advance - (atom.spacing ?? 0),
+            height: atom.ascent - atom.descent,
+            color: atom.mark,
+          });
+        }
+        for (const q of atom.quads) quads.push({ ...q, x: x + q.x, y: top + ascent + q.y });
+        x += atom.advance;
+      }
     }
     lastLineAdvance = options.lineHeight ?? Math.max(0, ascent - descent + baseLineGap + explicitSpacing);
     top += lastLineAdvance;
@@ -299,6 +407,7 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
   const ascent = Math.max(baseAscent, ...lastLine.map((a) => a.ascent));
   return {
     quads,
+    ...(marks.length ? { marks } : {}),
     width: measuredWidth,
     height: Math.max(ascent - descent, top - lastLineAdvance + ascent - descent),
     text,
