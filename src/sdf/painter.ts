@@ -25,6 +25,7 @@ const MARK_FONT: SdfFont = {
   atlases: [],
 };
 const MARK_GLYPH: SdfGlyph = { index: 0, atlas: 0, rect: [0, 0, 1, 1], metrics: [1, 1, 0, 0, 1], scale: 1 };
+const MARK_TEXTURE_KEY = `${MARK_FONT.id}:${MARK_GLYPH.atlas}`;
 
 const MAX_GPU_ATLAS_BYTES = 64 * 1024 * 1024;
 const MAX_PAINT_PIXELS = 16 * 1024 * 1024;
@@ -378,7 +379,7 @@ export class SdfTextPainter {
         bold: false,
       };
       batches.set(
-        MARK_FONT.id,
+        MARK_TEXTURE_KEY,
         marks.map((mark: SdfMarkQuad) => ({ ...synthetic, color: mark.color, mark })),
       );
     }
@@ -469,8 +470,8 @@ export class SdfTextPainter {
 
   /** Uploads (once) the solid white 1x1 texture backing <mark> highlights. */
   private ensureMarkTexture(): void {
-    if (this.textures.has(MARK_FONT.id)) return;
-    this.upload(MARK_FONT, 0, { width: 1, height: 1, alpha: new Uint8Array([255]) });
+    if (this.textures.has(MARK_TEXTURE_KEY)) return;
+    this.upload(MARK_FONT, MARK_GLYPH.atlas, { width: 1, height: 1, alpha: new Uint8Array([255]) });
   }
   dispose(): void {
     if (this.disposed) return;
