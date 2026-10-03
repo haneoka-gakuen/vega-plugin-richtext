@@ -40,10 +40,25 @@ interface Atom {
   /** Code-point offset of this atom in the plain text, for typewriter reveal. */
   characterIndex?: number;
 }
+const LENGTH_NUMBER = "[+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:e[+-]?\\d+)?";
+const SIMPLE_LENGTH = new RegExp(`^(${LENGTH_NUMBER})(px|em|%)?$`, "u");
+// These are the two calibrated-pixel forms emitted by the ADV parser.
+const PIXEL_LENGTH = `calc\\((${LENGTH_NUMBER}) \\* var\\(--vega-adv-pixel, 1px\\)\\)`;
+const ABSOLUTE_PIXEL_LENGTH = new RegExp(`^${PIXEL_LENGTH}$`, "u");
+const RELATIVE_PIXEL_LENGTH = new RegExp(`^calc\\(1em \\+ ${PIXEL_LENGTH}\\)$`, "u");
+
 const length = (value: string, size: number, pixelScale: number): number => {
-  const number = parseFloat(value);
+  const simple = SIMPLE_LENGTH.exec(value);
+  if (simple) {
+    const number = Number(simple[1]);
+    if (!Number.isFinite(number)) return 0;
+    return simple[2] === "em" ? number * size : simple[2] === "%" ? (number * size) / 100 : number * pixelScale;
+  }
+  const absolute = ABSOLUTE_PIXEL_LENGTH.exec(value);
+  const relative = absolute ? null : RELATIVE_PIXEL_LENGTH.exec(value);
+  const number = Number((absolute ?? relative)?.[1]);
   if (!Number.isFinite(number)) return 0;
-  return value.endsWith("em") ? number * size : value.endsWith("%") ? (number * size) / 100 : number * pixelScale;
+  return (relative ? size : 0) + number * pixelScale;
 };
 const selectGlyph = (
   fonts: readonly SdfFont[],
@@ -166,12 +181,7 @@ export function layoutSdfText(source: string, options: SdfTextLayoutOptions): Sd
         if (node.style.fontWeight) next.bold = Number(node.style.fontWeight) >= 600 || node.style.fontWeight === "bold";
         if (node.style.fontStyle) next.italic = node.style.fontStyle === "italic";
         if (node.style.fontSize) {
-          const value = node.style.fontSize;
-          next.size = value.endsWith("%")
-            ? (baseSize * parseFloat(value)) / 100
-            : value.endsWith("em")
-              ? baseSize * parseFloat(value)
-              : length(value, baseSize, pixelScale);
+          next.size = Math.max(0, length(node.style.fontSize, baseSize, pixelScale));
         }
         if (node.style.top) next.offset += length(node.style.top, next.size, pixelScale);
         if (node.style.whiteSpace === "nowrap") next.noBreak = true;
