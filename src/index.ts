@@ -400,3 +400,5 @@ export const createVegaRichTextPlugin = (): VegaPlugin =>
 export const vegaRichTextPlugin = createVegaRichTextPlugin();
 
 export default vegaRichTextPlugin;
+
+export { bindWebTextSelection, type WebTextSelectionGuard, type WebTextSelectionOptions } from "./webTextSelection.js";
