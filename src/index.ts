@@ -1,5 +1,11 @@
-import { defineVegaPlugin, defineVegaService, VEGA_TEXT_METRICS, type VegaPlugin } from "@haneoka/vega/plugin";
-import { advSliceVisible, advTextLengthCss, advVisibleLength, parseAdvRichText, type AdvRichTextNode } from "./adv/parser";
+import {
+  defineVegaPlugin,
+  defineVegaService,
+  VEGA_TEXT_METRICS,
+  type VegaPlugin,
+  type VegaServiceKey,
+} from "@haneoka/vega/plugin";
+import { advSliceVisible, advTextLengthCss, advVisibleLength, parseAdvRichText, type AdvRichTextNode } from "./adv/parser.js";
 
 // The ADV (TextMeshPro / RubyTextMeshPro) grammar lives here, not in Vega core.
 export {
@@ -8,7 +14,7 @@ export {
   advTextSizePercent,
   advVisibleLength,
   parseAdvRichText,
-} from "./adv/parser";
+} from "./adv/parser.js";
 export type {
   AdvRichTextBreakNode,
   AdvRichTextNode,
@@ -17,7 +23,7 @@ export type {
   AdvRichTextSpaceNode,
   AdvRichTextStyleNode,
   AdvRichTextTextNode,
-} from "./adv/parser";
+} from "./adv/parser.js";
 
 export interface VegaRichTextSource {
   readonly format: string;
@@ -63,7 +69,8 @@ export interface VegaRichTextService {
   dispose(): void;
 }
 
-export const VEGA_RICH_TEXT_SERVICE = defineVegaService<VegaRichTextService>("vega.rich-text");
+export const VEGA_RICH_TEXT_SERVICE: VegaServiceKey<VegaRichTextService> =
+  defineVegaService<VegaRichTextService>("vega.rich-text");
 
 const FORMAT = /^[a-z][a-z0-9.+-]*$/u;
 

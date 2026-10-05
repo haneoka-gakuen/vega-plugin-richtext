@@ -1,5 +1,5 @@
 import LineBreaker from "linebreak";
-import { parseAdvRichText, type AdvRichTextNode } from "../adv/parser";
+import { parseAdvRichText, type AdvRichTextNode } from "../adv/parser.js";
 import type {
   SdfColor,
   SdfFont,

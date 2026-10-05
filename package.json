@@ -38,6 +38,11 @@
       "default": "./dist/index.js"
     },
     "./package.json": "./package.json",
+    "./adv": {
+      "types": "./dist/adv/index.d.ts",
+      "import": "./dist/adv/index.js",
+      "default": "./dist/adv/index.js"
+    },
     "./sdf": {
       "types": "./dist/sdf/index.d.ts",
       "import": "./dist/sdf/index.js",
@@ -55,6 +60,11 @@
   },
   "peerDependencies": {
     "@haneoka/vega": "^0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@haneoka/vega": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@haneoka/vega": "workspace:*",
