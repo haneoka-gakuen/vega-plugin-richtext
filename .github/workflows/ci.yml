@@ -43,6 +43,9 @@ jobs:
           cache: pnpm
           cache-dependency-path: vega-plugin-richtext/pnpm-lock.yaml
 
+      - name: Set up locked Rust/WASM tools
+        uses: ./vega-plugin-richtext/.dependencies/vega/.github/actions/setup-wasm
+
       - name: Install dependencies
         working-directory: vega-plugin-richtext
         run: pnpm install --no-frozen-lockfile
